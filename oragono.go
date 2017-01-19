@@ -10,8 +10,8 @@ import (
 	"log"
 	"syscall"
 
-	"github.com/DanielOaks/oragono/irc"
-	"github.com/DanielOaks/oragono/mkcerts"
+	"github.com/leafi/oragono/irc"
+	"github.com/leafi/oragono/mkcerts"
 	"github.com/docopt/docopt-go"
 	"golang.org/x/crypto/ssh/terminal"
 )

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/DanielOaks/oragono/irc"
-	"github.com/DanielOaks/oragono/mkcerts"
-	"github.com/DanielOaks/oragono/web"
+	"github.com/leafi/oragono/irc"
+	"github.com/leafi/oragono/mkcerts"
+	"github.com/leafi/oragono/web"
 	"github.com/docopt/docopt-go"
 )
 
