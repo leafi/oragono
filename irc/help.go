@@ -290,6 +290,12 @@ Replies to a PING. Used to check link connectivity.`,
 
 Sends the text to the given targets as a PRIVMSG.`,
 	},
+	"samode": {
+		oper: true,
+		text: `SAMODE <channel> [<modestring> [<mode arguments>...]]
+
+Change modes of a channel/another user. See help for "cmode", "umode".`,
+	},
 	"sanick": {
 		oper: true,
 		text: `SANICK <currentnick> <newnick>

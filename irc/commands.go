@@ -182,6 +182,11 @@ var Commands = map[string]Command{
 		handler:   privmsgHandler,
 		minParams: 2,
 	},
+	"SAMODE": {
+		handler:   samodeHandler,
+		minParams: 2,
+		oper:      true,
+	},
 	"SANICK": {
 		handler:   sanickHandler,
 		minParams: 2,

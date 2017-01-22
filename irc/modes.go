@@ -244,14 +244,31 @@ func modeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 	_, errChan := CasefoldChannel(msg.Params[0])
 
 	if errChan == nil {
-		return cmodeHandler(server, client, msg)
+		return cmodeHandler(server, client, msg, false)
 	} else {
-		return umodeHandler(server, client, msg)
+		return umodeHandler(server, client, msg, false)
+	}
+}
+
+// SAMODE <target> [<modestring> [<mode arguments>...]]
+func samodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
+	_, errChan := CasefoldChannel(msg.Params[0])
+
+	// unnecessary?
+	if !client.flags[Operator] {
+		client.Send(nil, server.name, ERR_NOPRIVILEGES)
+		return false
+	}
+
+	if errChan == nil {
+		return cmodeHandler(server, client, msg, true)
+	} else {
+		return umodeHandler(server, client, msg, true)
 	}
 }
 
 // MODE <target> [<modestring> [<mode arguments>...]]
-func umodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
+func umodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage, samode bool) bool {
 	nickname, err := CasefoldName(msg.Params[0])
 
 	target := server.clients.Get(nickname)
@@ -263,9 +280,7 @@ func umodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 		return false
 	}
 
-	//TODO(dan): restricting to Operator here should be done with SAMODE only
-	// point SAMODE at this handler too, if they are operator and SAMODE was called then fine
-	if client != target && !client.flags[Operator] {
+	if client != target && (!samode || !client.flags[Operator]) {
 		if len(msg.Params) > 1 {
 			client.Send(nil, server.name, ERR_USERSDONTMATCH, client.nick, "Can't change modes for other users")
 		} else {
@@ -341,7 +356,7 @@ func umodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 }
 
 // MODE <target> [<modestring> [<mode arguments>...]]
-func cmodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
+func cmodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage, samode bool) bool {
 	channelName, err := CasefoldChannel(msg.Params[0])
 	channel := server.channels.Get(channelName)
 
@@ -414,7 +429,7 @@ func cmodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 		// so we only output one warning for each list type when full
 		listFullWarned := make(map[ChannelMode]bool)
 
-		clientIsOp := channel.clientIsAtLeastNoMutex(client, ChannelOperator)
+		clientIsOp := channel.clientIsAtLeastNoMutex(client, ChannelOperator) || (samode && client.flags[Operator])
 		var alreadySentPrivError bool
 
 		for _, change := range changes {
@@ -510,21 +525,23 @@ func cmodeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 
 			case ChannelFounder, ChannelAdmin, ChannelOperator, Halfop, Voice:
 				// make sure client has privs to edit the given prefix
-				var hasPrivs bool
+				hasPrivs := samode && client.flags[Operator]
 
-				for _, mode := range ChannelPrivModes {
-					if channel.members[client][mode] {
-						hasPrivs = true
+				if !hasPrivs {
+					for _, mode := range ChannelPrivModes {
+						if channel.members[client][mode] {
+							hasPrivs = true
 
-						// Admins can't give other people Admin or remove it from others,
-						// standard for that channel mode, we worry about this later
-						if mode == ChannelAdmin && change.mode == ChannelAdmin {
-							hasPrivs = false
+							// Admins can't give other people Admin or remove it from others,
+							// standard for that channel mode, we worry about this later
+							if mode == ChannelAdmin && change.mode == ChannelAdmin {
+								hasPrivs = false
+							}
+
+							break
+						} else if mode == change.mode {
+							break
 						}
-
-						break
-					} else if mode == change.mode {
-						break
 					}
 				}
 
