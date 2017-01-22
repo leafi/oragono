@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -37,7 +38,7 @@ var (
 	errDbOutOfDate = errors.New("Database schema is old.")
 )
 
-// Limits holds the maximum limits for various things such as topic lengths
+// Limits holds the maximum limits for various things such as topic lengths.
 type Limits struct {
 	AwayLen        int
 	ChannelLen     int
@@ -46,6 +47,13 @@ type Limits struct {
 	NickLen        int
 	TopicLen       int
 	ChanListModes  int
+	LineLen        LineLenLimits
+}
+
+// LineLenLimits holds the maximum limits for IRC lines.
+type LineLenLimits struct {
+	Tags int
+	Rest int
 }
 
 // ListenerInterface represents an interface for a listener.
@@ -146,6 +154,11 @@ func NewServer(configFilename string, config *Config) *Server {
 		SupportedCapabilities[SASL] = true
 	}
 
+	if config.Limits.LineLen.Tags > 512 || config.Limits.LineLen.Rest > 512 {
+		SupportedCapabilities[MaxLine] = true
+		CapValues[MaxLine] = fmt.Sprintf("%d,%d", config.Limits.LineLen.Tags, config.Limits.LineLen.Rest)
+	}
+
 	operClasses, err := config.OperatorClasses()
 	if err != nil {
 		log.Fatal("Error loading oper classes:", err.Error())
@@ -184,6 +197,10 @@ func NewServer(configFilename string, config *Config) *Server {
 			NickLen:        int(config.Limits.NickLen),
 			TopicLen:       int(config.Limits.TopicLen),
 			ChanListModes:  int(config.Limits.ChanListModes),
+			LineLen: LineLenLimits{
+				Tags: config.Limits.LineLen.Tags,
+				Rest: config.Limits.LineLen.Rest,
+			},
 		},
 		listeners:      make(map[string]ListenerInterface),
 		monitoring:     make(map[string][]Client),
@@ -322,7 +339,7 @@ func (server *Server) setISupport() {
 	server.isupport.Add("RPCHAN", "E")
 	server.isupport.Add("RPUSER", "E")
 	server.isupport.Add("STATUSMSG", "~&@%+")
-	server.isupport.Add("TARGMAX", fmt.Sprintf("NAMES:1,LIST:1,KICK:1,WHOIS:1,PRIVMSG:%s,NOTICE:%s,MONITOR:", maxTargetsString, maxTargetsString))
+	server.isupport.Add("TARGMAX", fmt.Sprintf("NAMES:1,LIST:1,KICK:1,WHOIS:1,PRIVMSG:%s,TAGMSG:%s,NOTICE:%s,MONITOR:", maxTargetsString, maxTargetsString, maxTargetsString))
 	server.isupport.Add("TOPICLEN", strconv.Itoa(server.limits.TopicLen))
 
 	// account registration
@@ -590,6 +607,11 @@ func (server *Server) wslisten(addr string, tlsMap map[string]*TLSListenConfig) 
 	}()
 }
 
+// generateMessageID returns a network-unique message ID.
+func (server *Server) generateMessageID() string {
+	return fmt.Sprintf("%s-%s", strconv.FormatInt(time.Now().UTC().UnixNano(), 10), strconv.FormatInt(rand.Int63(), 10))
+}
+
 //
 // server functionality
 //
@@ -831,11 +853,64 @@ func topicHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 	return false
 }
 
+func wordWrap(text string, lineWidth int) []string {
+	var lines []string
+	var cacheLine, cacheWord string
+
+	for _, char := range text {
+		if (char == ' ' || char == '-') && len(cacheLine)+len(cacheWord)+1 < lineWidth {
+			cacheLine += cacheWord + string(char)
+			cacheWord = ""
+		} else if len(cacheLine)+len(cacheWord)+1 >= lineWidth {
+			if len(cacheLine) < (lineWidth / 2) {
+				// there must be a really long word or something, just split on word boundary
+				cacheLine += cacheWord + string(char)
+				cacheWord = ""
+			}
+			lines = append(lines, cacheLine)
+			cacheLine = ""
+		} else {
+			cacheWord += string(char)
+		}
+	}
+	if len(cacheWord) > 0 {
+		cacheLine += cacheWord
+	}
+	if len(cacheLine) > 0 {
+		lines = append(lines, cacheLine)
+	}
+
+	return lines
+}
+
+// SplitMessage represents a message that's been split for sending.
+type SplitMessage struct {
+	For512     []string
+	ForMaxLine string
+}
+
+func (server *Server) splitMessage(original string, origIs512 bool) SplitMessage {
+	var newSplit SplitMessage
+
+	newSplit.ForMaxLine = original
+
+	if !origIs512 {
+		newSplit.For512 = wordWrap(original, 400)
+	} else {
+		newSplit.For512 = []string{original}
+	}
+
+	return newSplit
+}
+
 // PRIVMSG <target>{,<target>} <message>
 func privmsgHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 	clientOnlyTags := GetClientOnlyTags(msg.Tags)
 	targets := strings.Split(msg.Params[0], ",")
 	message := msg.Params[1]
+
+	// split privmsg
+	splitMsg := server.splitMessage(message, !client.capabilities[MaxLine])
 
 	for i, targetString := range targets {
 		// max of four targets per privmsg
@@ -857,7 +932,8 @@ func privmsgHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool 
 				client.Send(nil, server.name, ERR_NOSUCHCHANNEL, client.nick, targetString, "No such channel")
 				continue
 			}
-			channel.PrivMsg(lowestPrefix, clientOnlyTags, client, message)
+			msgid := server.generateMessageID()
+			channel.SplitPrivMsg(msgid, lowestPrefix, clientOnlyTags, client, splitMsg)
 		} else {
 			target, err = CasefoldName(targetString)
 			user := server.clients.Get(target)
@@ -870,9 +946,71 @@ func privmsgHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool 
 			if !user.capabilities[MessageTags] {
 				clientOnlyTags = nil
 			}
-			user.SendFromClient(client, clientOnlyTags, client.nickMaskString, "PRIVMSG", user.nick, message)
+			msgid := server.generateMessageID()
+			user.SendSplitMsgFromClient(msgid, client, clientOnlyTags, "PRIVMSG", user.nick, splitMsg)
 			if client.capabilities[EchoMessage] {
-				client.SendFromClient(client, clientOnlyTags, client.nickMaskString, "PRIVMSG", user.nick, message)
+				client.SendSplitMsgFromClient(msgid, client, clientOnlyTags, "PRIVMSG", user.nick, splitMsg)
+			}
+			if user.flags[Away] {
+				//TODO(dan): possibly implement cooldown of away notifications to users
+				client.Send(nil, server.name, RPL_AWAY, user.nick, user.awayMessage)
+			}
+		}
+	}
+	return false
+}
+
+// TAGMSG <target>{,<target>}
+func tagmsgHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
+	clientOnlyTags := GetClientOnlyTags(msg.Tags)
+	// no client-only tags, so we can drop it
+	if clientOnlyTags == nil {
+		return false
+	}
+
+	targets := strings.Split(msg.Params[0], ",")
+
+	for i, targetString := range targets {
+		// max of four targets per privmsg
+		if i > maxTargets-1 {
+			break
+		}
+		prefixes, targetString := SplitChannelMembershipPrefixes(targetString)
+		lowestPrefix := GetLowestChannelModePrefix(prefixes)
+
+		// eh, no need to notify them
+		if len(targetString) < 1 {
+			continue
+		}
+
+		target, err := CasefoldChannel(targetString)
+		if err == nil {
+			channel := server.channels.Get(target)
+			if channel == nil {
+				client.Send(nil, server.name, ERR_NOSUCHCHANNEL, client.nick, targetString, "No such channel")
+				continue
+			}
+			msgid := server.generateMessageID()
+
+			channel.TagMsg(msgid, lowestPrefix, clientOnlyTags, client)
+		} else {
+			target, err = CasefoldName(targetString)
+			user := server.clients.Get(target)
+			if err != nil || user == nil {
+				if len(target) > 0 {
+					client.Send(nil, server.name, ERR_NOSUCHNICK, target, "No such nick")
+				}
+				continue
+			}
+			msgid := server.generateMessageID()
+
+			// end user can't receive tagmsgs
+			if !user.capabilities[MessageTags] {
+				continue
+			}
+			user.SendFromClient(msgid, client, clientOnlyTags, "TAGMSG", user.nick)
+			if client.capabilities[EchoMessage] {
+				client.SendFromClient(msgid, client, clientOnlyTags, "TAGMSG", user.nick)
 			}
 			if user.flags[Away] {
 				//TODO(dan): possibly implement cooldown of away notifications to users
@@ -1070,11 +1208,11 @@ func operHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 
 	// push new vhost if one is set
 	if len(server.operators[name].Vhost) > 0 {
-		originalHost := client.nickMaskString
-		client.vhost = server.operators[name].Vhost
 		for fClient := range client.Friends(ChgHost) {
-			fClient.SendFromClient(client, nil, originalHost, "CHGHOST", client.username, client.vhost)
+			fClient.SendFromClient("", client, nil, "CHGHOST", client.username, server.operators[name].Vhost)
 		}
+		// CHGHOST requires prefix nickmask to have original hostname, so do that before updating nickmask
+		client.vhost = server.operators[name].Vhost
 		client.updateNickMask()
 	}
 
@@ -1097,6 +1235,11 @@ func (server *Server) rehash() error {
 
 	if err != nil {
 		return fmt.Errorf("Error rehashing config file config: %s", err.Error())
+	}
+
+	// line lengths cannot be changed after launching the server
+	if server.limits.LineLen.Tags != config.Limits.LineLen.Tags || server.limits.LineLen.Rest != config.Limits.LineLen.Rest {
+		return fmt.Errorf("Maximum line length (linelen) cannot be changed after launching the server, rehash aborted")
 	}
 
 	// confirm connectionLimits are fine
@@ -1307,9 +1450,9 @@ func awayHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 	// dispatch away-notify
 	for friend := range client.Friends(AwayNotify) {
 		if client.flags[Away] {
-			friend.SendFromClient(client, nil, client.nickMaskString, "AWAY", client.awayMessage)
+			friend.SendFromClient("", client, nil, "AWAY", client.awayMessage)
 		} else {
-			friend.SendFromClient(client, nil, client.nickMaskString, "AWAY")
+			friend.SendFromClient("", client, nil, "AWAY")
 		}
 	}
 
@@ -1355,6 +1498,9 @@ func noticeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 	targets := strings.Split(msg.Params[0], ",")
 	message := msg.Params[1]
 
+	// split privmsg
+	splitMsg := server.splitMessage(message, !client.capabilities[MaxLine])
+
 	for i, targetString := range targets {
 		// max of four targets per privmsg
 		if i > maxTargets-1 {
@@ -1370,7 +1516,8 @@ func noticeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 				// errors silently ignored with NOTICE as per RFC
 				continue
 			}
-			channel.Notice(lowestPrefix, clientOnlyTags, client, message)
+			msgid := server.generateMessageID()
+			channel.SplitNotice(msgid, lowestPrefix, clientOnlyTags, client, splitMsg)
 		} else {
 			target, err := CasefoldName(targetString)
 			if err != nil {
@@ -1385,9 +1532,10 @@ func noticeHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 			if !user.capabilities[MessageTags] {
 				clientOnlyTags = nil
 			}
-			user.SendFromClient(client, clientOnlyTags, client.nickMaskString, "NOTICE", user.nick, message)
+			msgid := server.generateMessageID()
+			user.SendSplitMsgFromClient(msgid, client, clientOnlyTags, "NOTICE", user.nick, splitMsg)
 			if client.capabilities[EchoMessage] {
-				client.SendFromClient(client, clientOnlyTags, client.nickMaskString, "NOTICE", user.nick, message)
+				client.SendSplitMsgFromClient(msgid, client, clientOnlyTags, "NOTICE", user.nick, splitMsg)
 			}
 		}
 	}
@@ -1531,7 +1679,7 @@ func (target *Client) RplList(channel *Channel) {
 		}
 	}
 
-	target.Send(nil, target.server.name, RPL_LIST, target.nick, channel.name, string(memberCount), channel.topic)
+	target.Send(nil, target.server.name, RPL_LIST, target.nick, channel.name, strconv.Itoa(memberCount), channel.topic)
 }
 
 // NAMES [<channel>{,<channel>}]
@@ -1675,5 +1823,29 @@ func whowasHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
 			client.Send(nil, server.name, RPL_ENDOFWHOWAS, client.nick, nickname, "End of WHOWAS")
 		}
 	}
+	return false
+}
+
+// LUSERS [<mask> [<server>]]
+func lusersHandler(server *Server, client *Client, msg ircmsg.IrcMessage) bool {
+	//TODO(vegax87) Fix network statistics and additional parameters
+	var totalcount, invisiblecount, opercount int
+
+	server.clients.ByNickMutex.RLock()
+	defer server.clients.ByNickMutex.RUnlock()
+
+	for _, onlineusers := range server.clients.ByNick {
+		totalcount++
+		if onlineusers.flags[Invisible] {
+			invisiblecount++
+		}
+		if onlineusers.flags[Operator] {
+			opercount++
+		}
+	}
+	client.Send(nil, server.name, RPL_LUSERCLIENT, client.nick, fmt.Sprintf("There are %d users and %d invisible on %d server(s)", totalcount, invisiblecount, 1))
+	client.Send(nil, server.name, RPL_LUSEROP, client.nick, fmt.Sprintf("%d operators online", opercount))
+	client.Send(nil, server.name, RPL_LUSERCHANNELS, client.nick, fmt.Sprintf("%d channels formed", len(server.channels)))
+	client.Send(nil, server.name, RPL_LUSERME, client.nick, fmt.Sprintf("I have %d clients and %d servers", totalcount, 1))
 	return false
 }

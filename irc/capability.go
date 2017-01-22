@@ -22,7 +22,9 @@ const (
 	EchoMessage     Capability = "echo-message"
 	ExtendedJoin    Capability = "extended-join"
 	InviteNotify    Capability = "invite-notify"
-	MessageTags     Capability = "draft/message-tags"
+	MaxLine         Capability = "draft/maxline"
+	MessageIDs      Capability = "draft/message-ids"
+	MessageTags     Capability = "draft/message-tags-0.2"
 	MultiPrefix     Capability = "multi-prefix"
 	SASL            Capability = "sasl"
 	ServerTime      Capability = "server-time"
@@ -39,8 +41,10 @@ var (
 		EchoMessage:   true,
 		ExtendedJoin:  true,
 		InviteNotify:  true,
-		MessageTags:   true,
-		MultiPrefix:   true,
+		MessageIDs:    true,
+		// MaxLine is set during server startup
+		MessageTags: true,
+		MultiPrefix: true,
 		// SASL is set during server startup
 		ServerTime:      true,
 		UserhostInNames: true,

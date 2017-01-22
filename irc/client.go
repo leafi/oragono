@@ -12,6 +12,7 @@ import (
 	"net"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/DanielOaks/girc-go/ircmsg"
@@ -135,6 +136,21 @@ func NewClient(server *Server, conn net.Conn, isTLS bool) *Client {
 // command goroutine
 //
 
+func (client *Client) maxlens() (int, int) {
+	maxlenTags := 512
+	maxlenRest := 512
+	if client.capabilities[MessageTags] {
+		maxlenTags = 4096
+	}
+	if client.capabilities[MaxLine] {
+		if client.server.limits.LineLen.Tags > maxlenTags {
+			maxlenTags = client.server.limits.LineLen.Tags
+		}
+		maxlenRest = client.server.limits.LineLen.Rest
+	}
+	return maxlenTags, maxlenRest
+}
+
 func (client *Client) run() {
 	var err error
 	var isExiting bool
@@ -152,8 +168,12 @@ func (client *Client) run() {
 			break
 		}
 
-		msg, err = ircmsg.ParseLine(line)
-		if err != nil {
+		maxlenTags, maxlenRest := client.maxlens()
+
+		msg, err = ircmsg.ParseLineMaxLen(line, maxlenTags, maxlenRest)
+		if err == ircmsg.ErrorLineIsEmpty {
+			continue
+		} else if err != nil {
 			client.Quit("received malformed line")
 			break
 		}
@@ -412,7 +432,7 @@ func (client *Client) ChangeNickname(nickname string) error {
 func (client *Client) Quit(message string) {
 	if !client.quitMessageSent {
 		client.Send(nil, client.nickMaskString, "QUIT", message)
-		client.Send(nil, client.nickMaskString, "ERROR", message)
+		client.Send(nil, "", "ERROR", message)
 		client.quitMessageSent = true
 	}
 }
@@ -479,9 +499,21 @@ func (client *Client) destroy() {
 	}
 }
 
+// SendSplitMsgFromClient sends an IRC PRIVMSG/NOTICE coming from a specific client.
+// Adds account-tag to the line as well.
+func (client *Client) SendSplitMsgFromClient(msgid string, from *Client, tags *map[string]ircmsg.TagValue, command, target string, message SplitMessage) {
+	if client.capabilities[MaxLine] {
+		client.SendFromClient(msgid, from, tags, command, target, message.ForMaxLine)
+	} else {
+		for _, str := range message.For512 {
+			client.SendFromClient(msgid, from, tags, command, target, str)
+		}
+	}
+}
+
 // SendFromClient sends an IRC line coming from a specific client.
 // Adds account-tag to the line as well.
-func (client *Client) SendFromClient(from *Client, tags *map[string]ircmsg.TagValue, prefix string, command string, params ...string) error {
+func (client *Client) SendFromClient(msgid string, from *Client, tags *map[string]ircmsg.TagValue, command string, params ...string) error {
 	// attach account-tag
 	if client.capabilities[AccountTag] && from.account != &NoAccount {
 		if tags == nil {
@@ -490,9 +522,25 @@ func (client *Client) SendFromClient(from *Client, tags *map[string]ircmsg.TagVa
 			(*tags)["account"] = ircmsg.MakeTagValue(from.account.Name)
 		}
 	}
+	// attach message-id
+	if len(msgid) > 0 && client.capabilities[MessageIDs] {
+		if tags == nil {
+			tags = ircmsg.MakeTags("draft/msgid", msgid)
+		} else {
+			(*tags)["draft/msgid"] = ircmsg.MakeTagValue(msgid)
+		}
+	}
 
-	return client.Send(tags, prefix, command, params...)
+	return client.Send(tags, from.nickMaskString, command, params...)
 }
+
+var (
+	// these are all the output commands that MUST have their last param be a trailing
+	commandsThatMustUseTrailing = map[string]bool{
+		"PRIVMSG": true,
+		"NOTICE":  true,
+	}
+)
 
 // Send sends an IRC line to the client.
 func (client *Client) Send(tags *map[string]ircmsg.TagValue, prefix string, command string, params ...string) error {
@@ -505,9 +553,20 @@ func (client *Client) Send(tags *map[string]ircmsg.TagValue, prefix string, comm
 		}
 	}
 
+	// force trailing
+	var usedSpaceHack bool
+	if commandsThatMustUseTrailing[strings.ToUpper(command)] && len(params) > 0 {
+		lastParam := params[len(params)-1]
+		if !strings.Contains(lastParam, " ") {
+			params[len(params)-1] = lastParam + " "
+			usedSpaceHack = true
+		}
+	}
+
 	// send out the message
 	message := ircmsg.MakeMessage(tags, prefix, command, params...)
-	line, err := message.Line()
+	maxlenTags, maxlenRest := client.maxlens()
+	line, err := message.LineMaxLen(maxlenTags, maxlenRest)
 	if err != nil {
 		// try not to fail quietly - especially useful when running tests, as a note to dig deeper
 		// log.Println("Error assembling message:")
@@ -519,6 +578,12 @@ func (client *Client) Send(tags *map[string]ircmsg.TagValue, prefix string, comm
 		client.socket.Write(line)
 		return err
 	}
+
+	// strip space hack if we used it
+	if usedSpaceHack {
+		line = line[:len(line)-3] + "\r\n"
+	}
+
 	client.socket.Write(line)
 	return nil
 }

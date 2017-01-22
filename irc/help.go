@@ -189,6 +189,13 @@ Shows information on the given channels (or if none are given, then on all
 channels). <elistcond>s modify how the channels are selected.`,
 		//TODO(dan): Explain <elistcond>s in more specific detail
 	},
+	"lusers": {
+		text: `LUSERS [<mask> [<server>]]
+
+Shows statistics about the size of the network. If <mask> is given, only
+returns stats for servers matching the given mask.  If <server> is given, the
+command is processed by that server.`,
+	},
 	"mode": {
 		text: `MODE <target> [<modestring> [<mode arguments>...]]
 
@@ -293,6 +300,12 @@ Gives the given user a new nickname.`,
 		text: `SCENE <target> <text to be sent>
 
 The SCENE command is used to send a scene notification to the given target.`,
+	},
+	"tagmsg": {
+		text: `@+client-only-tags TAGMSG <target>{,<target>}
+
+Sends the given client-only tags to the given targets as a TAGMSG. See the IRCv3
+specs for more info: http://ircv3.net/specs/core/message-tags-3.3.html`,
 	},
 	"quit": {
 		text: `QUIT [reason]

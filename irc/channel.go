@@ -371,17 +371,12 @@ func (channel *Channel) CanSpeak(client *Client) bool {
 	return true
 }
 
-// PrivMsg sends a private message to everyone in this channel.
-func (channel *Channel) PrivMsg(minPrefix *ChannelMode, clientOnlyTags *map[string]ircmsg.TagValue, client *Client, message string) {
-	channel.sendMessage("PRIVMSG", minPrefix, clientOnlyTags, client, message)
+// TagMsg sends a tag message to everyone in this channel who can accept them.
+func (channel *Channel) TagMsg(msgid string, minPrefix *ChannelMode, clientOnlyTags *map[string]ircmsg.TagValue, client *Client) {
+	channel.sendMessage(msgid, "TAGMSG", []Capability{MessageTags}, minPrefix, clientOnlyTags, client, nil)
 }
 
-// Notice sends a private message to everyone in this channel.
-func (channel *Channel) Notice(minPrefix *ChannelMode, clientOnlyTags *map[string]ircmsg.TagValue, client *Client, message string) {
-	channel.sendMessage("NOTICE", minPrefix, clientOnlyTags, client, message)
-}
-
-func (channel *Channel) sendMessage(cmd string, minPrefix *ChannelMode, clientOnlyTags *map[string]ircmsg.TagValue, client *Client, message string) {
+func (channel *Channel) sendMessage(msgid, cmd string, requiredCaps []Capability, minPrefix *ChannelMode, clientOnlyTags *map[string]ircmsg.TagValue, client *Client, message *string) {
 	if !channel.CanSpeak(client) {
 		client.Send(nil, client.server.name, ERR_CANNOTSENDTOCHAN, channel.name, "Cannot send to channel")
 		return
@@ -403,10 +398,71 @@ func (channel *Channel) sendMessage(cmd string, minPrefix *ChannelMode, clientOn
 		if member == client && !client.capabilities[EchoMessage] {
 			continue
 		}
+
+		canReceive := true
+		for _, capName := range requiredCaps {
+			if !member.capabilities[capName] {
+				canReceive = false
+			}
+		}
+		if !canReceive {
+			continue
+		}
+
+		var messageTagsToUse *map[string]ircmsg.TagValue
 		if member.capabilities[MessageTags] {
-			member.SendFromClient(client, clientOnlyTags, client.nickMaskString, cmd, channel.name, message)
+			messageTagsToUse = clientOnlyTags
+		}
+
+		if message == nil {
+			member.SendFromClient(msgid, client, messageTagsToUse, cmd, channel.name)
 		} else {
-			member.SendFromClient(client, nil, client.nickMaskString, cmd, channel.name, message)
+			member.SendFromClient(msgid, client, messageTagsToUse, cmd, channel.name, *message)
+		}
+	}
+}
+
+// SplitPrivMsg sends a private message to everyone in this channel.
+func (channel *Channel) SplitPrivMsg(msgid string, minPrefix *ChannelMode, clientOnlyTags *map[string]ircmsg.TagValue, client *Client, message SplitMessage) {
+	channel.sendSplitMessage(msgid, "PRIVMSG", minPrefix, clientOnlyTags, client, &message)
+}
+
+// SplitNotice sends a private message to everyone in this channel.
+func (channel *Channel) SplitNotice(msgid string, minPrefix *ChannelMode, clientOnlyTags *map[string]ircmsg.TagValue, client *Client, message SplitMessage) {
+	channel.sendSplitMessage(msgid, "NOTICE", minPrefix, clientOnlyTags, client, &message)
+}
+
+func (channel *Channel) sendSplitMessage(msgid, cmd string, minPrefix *ChannelMode, clientOnlyTags *map[string]ircmsg.TagValue, client *Client, message *SplitMessage) {
+	if !channel.CanSpeak(client) {
+		client.Send(nil, client.server.name, ERR_CANNOTSENDTOCHAN, channel.name, "Cannot send to channel")
+		return
+	}
+
+	channel.membersMutex.RLock()
+	defer channel.membersMutex.RUnlock()
+
+	// for STATUSMSG
+	var minPrefixMode ChannelMode
+	if minPrefix != nil {
+		minPrefixMode = *minPrefix
+	}
+	for member := range channel.members {
+		if minPrefix != nil && !channel.ClientIsAtLeast(member, minPrefixMode) {
+			// STATUSMSG
+			continue
+		}
+		if member == client && !client.capabilities[EchoMessage] {
+			continue
+		}
+		var tagsToUse *map[string]ircmsg.TagValue
+		if member.capabilities[MessageTags] {
+			tagsToUse = clientOnlyTags
+		}
+
+		if message == nil {
+			member.SendFromClient(msgid, client, tagsToUse, cmd, channel.name)
+		} else {
+			member.SendSplitMsgFromClient(msgid, client, tagsToUse, cmd, channel.name, *message)
 		}
 	}
 }
