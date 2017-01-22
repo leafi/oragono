@@ -537,6 +537,7 @@ func (client *Client) SendFromClient(msgid string, from *Client, tags *map[strin
 var (
 	// these are all the output commands that MUST have their last param be a trailing
 	commandsThatMustUseTrailing = map[string]bool{
+		"PING":    true,
 		"PRIVMSG": true,
 		"NOTICE":  true,
 	}
