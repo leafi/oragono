@@ -14,8 +14,6 @@ import (
 	"strconv"
 	"time"
 
-	"strings"
-
 	"github.com/DanielOaks/girc-go/ircmsg"
 	"github.com/DanielOaks/go-ident"
 )
@@ -521,22 +519,6 @@ func (client *Client) Send(tags *map[string]ircmsg.TagValue, prefix string, comm
 		client.socket.Write(line)
 		return err
 	}
-	// LEAFI HAX!!!!
-	if command == "PRIVMSG" && len(params) == 2 && !strings.Contains(params[1], " ") {
-		fmt.Println("LEAFI HAX: correcting..")
-		lspc := strings.LastIndex(line, " ")
-		line2 := line[0:lspc] + " :" + line[lspc+1:]
-		fmt.Println(line + " -> " + line2)
-		line = line2
-	} /* else {
-		var ct string
-		if len(params) == 2 && strings.Contains(params[1], " ") {
-			ct = "true"
-		} else {
-			ct = "false"
-		}
-		fmt.Println("Didn't match: " + line + ", " + command + ", " + strconv.Itoa(len(params)) + ", " + ct)
-	}*/
 	client.socket.Write(line)
 	return nil
 }
