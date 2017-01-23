@@ -203,8 +203,8 @@ func (client *Client) run() {
 //
 
 func (client *Client) connectionTimeout() {
-	client.Quit(fmt.Sprintf("Ping timeout: %s seconds", TIMEOUT_STATED_SECONDS))
-	client.isQuitting = true
+	/*client.Quit(fmt.Sprintf("Ping timeout: %s seconds", TIMEOUT_STATED_SECONDS))
+	client.isQuitting = true*/
 }
 
 //
@@ -241,11 +241,11 @@ func (client *Client) Touch() {
 func (client *Client) Idle() {
 	client.Send(nil, "", "PING", client.nick)
 
-	if client.quitTimer == nil {
+	/*if client.quitTimer == nil {
 		client.quitTimer = time.AfterFunc(QUIT_TIMEOUT, client.connectionTimeout)
 	} else {
 		client.quitTimer.Reset(QUIT_TIMEOUT)
-	}
+	}*/
 }
 
 // Register sets the client details as appropriate when entering the network.
